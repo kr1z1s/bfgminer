@@ -1,5 +1,6 @@
 /*
  * Copyright 2014 Luke Dashjr
+ * Copyright 2014 Nate Woolls
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -21,12 +22,15 @@
 
 #define ROCKMINER_MIN_FREQ_MHZ  200
 #define ROCKMINER_DEF_FREQ_MHZ  270
-#define ROCKMINER_MAX_FREQ_MHZ  290
+#define ROCKMINER_MAX_SAFE_FREQ_MHZ  290
+#define ROCKMINER_MAX_FREQ_MHZ  640
 #define ROCKMINER_POLL_US         0
 #define ROCKMINER_RETRY_US  5000000
 #define ROCKMINER_MIDTASK_TIMEOUT_US  500000
 #define ROCKMINER_MIDTASK_RETRY_US   1000000
 #define ROCKMINER_TASK_TIMEOUT_US    5273438
+#define ROCKMINER_IO_SPEED 115200
+#define ROCKMINER_READ_TIMEOUT 1 //deciseconds
 
 #define ROCKMINER_MAX_CHIPS  64
 #define ROCKMINER_WORK_REQ_SIZE  0x40
@@ -48,6 +52,42 @@ struct rockminer_chip_data {
 	struct timeval tv_midtask_timeout;
 	int requested_work;
 };
+
+static
+int rockminer_open(const char *devpath)
+{
+	return serial_open(devpath, ROCKMINER_IO_SPEED, ROCKMINER_READ_TIMEOUT, true);
+}
+
+static
+void rockminer_log_protocol(int fd, const void *buf, size_t bufLen, const char *prefix)
+{
+	char hex[(bufLen * 2) + 1];
+	bin2hex(hex, buf, bufLen);
+	applog(LOG_DEBUG, "%s fd=%d: DEVPROTO: %s %s", rockminer_drv.dname, fd, prefix, hex);
+}
+
+static
+int rockminer_read(int fd, void *buf, size_t bufLen)
+{
+	int result = read(fd, buf, bufLen);
+	
+	if (result < 0)
+		applog(LOG_ERR, "%s: %s fd %d", rockminer_drv.dname, "Failed to read", fd);
+	else if ((result > 0) && opt_dev_protocol && opt_debug)
+		rockminer_log_protocol(fd, buf, bufLen, "RECV");
+
+	return result;
+}
+
+static
+int rockminer_write(int fd, const void *buf, size_t bufLen)
+{
+	if (opt_dev_protocol && opt_debug)
+		rockminer_log_protocol(fd, buf, bufLen, "SEND");
+
+	return write(fd, buf, bufLen);
+}
 
 static
 void rockminer_job_buf_init(uint8_t * const buf, const uint8_t chipid)
@@ -114,7 +154,7 @@ int8_t rockminer_bisect_chips(const int fd, uint8_t * const buf)
 			tests[i] = chipid;
 			
 			buf[0x32] = chipid;
-			if (write(fd, buf, ROCKMINER_WORK_REQ_SIZE) != ROCKMINER_WORK_REQ_SIZE)
+			if (rockminer_write(fd, buf, ROCKMINER_WORK_REQ_SIZE) != ROCKMINER_WORK_REQ_SIZE)
 				applogr(-1, LOG_DEBUG, "%s(%d): Error sending request for chip %d", __func__, fd, chipid);
 			
 			tailsprintf(msg, sizeof(msg), "%d ", chipid);
@@ -123,7 +163,7 @@ int8_t rockminer_bisect_chips(const int fd, uint8_t * const buf)
 		msg[strlen(msg)-1] = '\0';
 		applog(LOG_DEBUG, "%s(%d): Testing chips %s (within range %d-%d)", __func__, fd, msg, minvalid, maxvalid);
 		
-		while ( (rsz = read(fd, reply, sizeof(reply))) == sizeof(reply))
+		while ( (rsz = rockminer_read(fd, reply, sizeof(reply))) == sizeof(reply))
 		{
 			const uint8_t chipid = reply[5] & 0x3f;
 			if (chipid > minvalid)
@@ -157,7 +197,7 @@ bool rockminer_detect_one(const char * const devpath)
 	uint8_t buf[ROCKMINER_WORK_REQ_SIZE], reply[ROCKMINER_REPLY_SIZE];
 	ssize_t rsz;
 	
-	fd = serial_open(devpath, 0, 1, true);
+	fd = rockminer_open(devpath);
 	if (fd < 0)
 		return_via_applog(err, , LOG_DEBUG, "%s: %s %s", rockminer_drv.dname, "Failed to open", devpath);
 	
@@ -168,14 +208,14 @@ bool rockminer_detect_one(const char * const devpath)
 	memcpy(&buf[   0], golden_midstate, 0x20);
 	memcpy(&buf[0x34], golden_datatail,  0xc);
 	
-	if (write(fd, buf, sizeof(buf)) != sizeof(buf))
+	if (rockminer_write(fd, buf, sizeof(buf)) != sizeof(buf))
 		return_via_applog(err, , LOG_DEBUG, "%s: %s %s", rockminer_drv.dname, "Error sending request to ", devpath);
 	
 	while (true)
 	{
-		rsz = read(fd, reply, sizeof(reply));
+		rsz = rockminer_read(fd, reply, sizeof(reply));
 		if (rsz != sizeof(reply))
-			return_via_applog(err, , LOG_DEBUG, "%s: Short read from %s (%d)", rockminer_drv.dname, devpath, rsz);
+			return_via_applog(err, , LOG_DEBUG, "%s: Short read from %s (%d)", rockminer_drv.dname, devpath, (int)rsz);
 		if ((!memcmp(reply, golden_result, sizeof(golden_result))) && (reply[4] & 0xf) == ROCKMINER_REPLY_NONCE_FOUND)
 			break;
 	}
@@ -259,7 +299,7 @@ bool rockminer_send_work(struct thr_info * const thr)
 	struct rockminer_chip_data * const chip = thr->cgpu_data;
 	const int fd = dev->device_fd;
 	
-	return (write(fd, chip->next_work_req, sizeof(chip->next_work_req)) == sizeof(chip->next_work_req));
+	return (rockminer_write(fd, chip->next_work_req, sizeof(chip->next_work_req)) == sizeof(chip->next_work_req));
 }
 
 static
@@ -314,7 +354,7 @@ void rockminer_poll(struct thr_info * const master_thr)
 	
 	if (fd < 0)
 	{
-		fd = serial_open(dev->device_path, 0, 1, true);
+		fd = rockminer_open(dev->device_path);
 		if (fd < 0)
 		{
 			timer_set_delay_from_now(&master_thr->tv_poll, ROCKMINER_RETRY_US);
@@ -339,7 +379,7 @@ void rockminer_poll(struct thr_info * const master_thr)
 		}
 	}
 	
-	while ( (rsz = read(fd, reply, sizeof(reply))) == sizeof(reply))
+	while ( (rsz = rockminer_read(fd, reply, sizeof(reply))) == sizeof(reply))
 	{
 // 		const uint8_t status = reply[4] >> 4;
 		const enum rockminer_replies cmd = reply[4] & 0xf;
@@ -387,13 +427,15 @@ void rockminer_poll(struct thr_info * const master_thr)
 			case ROCKMINER_REPLY_TASK_COMPLETE:
 				applog(LOG_DEBUG, "%"PRIpreprv": Task %d completed", proc->proc_repr, taskid);
 				hashes_done2(thr, 0x100000000, NULL);
-				timer_set_delay_from_now(&chip->tv_midtask_timeout, ROCKMINER_MIDTASK_TIMEOUT_US);
+				if (proc->deven == DEV_ENABLED)
+					timer_set_delay_from_now(&chip->tv_midtask_timeout, ROCKMINER_MIDTASK_TIMEOUT_US);
 				break;
 			case ROCKMINER_REPLY_GET_TASK:
 				applog(LOG_DEBUG, "%"PRIpreprv": Task %d requested", proc->proc_repr, taskid);
 				thr->queue_full = false;
 				++chip->requested_work;
-				timer_set_delay_from_now(&chip->tv_midtask_timeout, ROCKMINER_TASK_TIMEOUT_US);
+				if (proc->deven == DEV_ENABLED)
+					timer_set_delay_from_now(&chip->tv_midtask_timeout, ROCKMINER_TASK_TIMEOUT_US);
 				break;
 		}
 	}
@@ -409,6 +451,11 @@ void rockminer_poll(struct thr_info * const master_thr)
 		
 		if (timer_passed(&chip->tv_midtask_timeout, &tv_now))
 		{
+			if (proc->deven != DEV_ENABLED)
+			{
+				timer_unset(&chip->tv_midtask_timeout);
+				continue;
+			}
 			// A task completed, but no request followed
 			// This means it missed our last task send, so we need to resend it
 			applog(LOG_WARNING, "%"PRIpreprv": No task request? Probably lost, resending task %d", proc->proc_repr, chip->last_taskid);
@@ -438,14 +485,24 @@ void rockminer_poll(struct thr_info * const master_thr)
 }
 
 static
-const char *rockminer_set_clock(struct cgpu_info * const proc, const char * const optname, const char * const newvalue, char * const replybuf, enum bfg_set_device_replytype * const out_success)
+const char *rockminer_set_clock(struct cgpu_info * const proc, const char * const optname, const char *newvalue, char * const replybuf, enum bfg_set_device_replytype * const out_success)
 {
 	struct thr_info * const thr = proc->thr[0];
 	struct rockminer_chip_data * const chip = thr->cgpu_data;
+	bool unsafe = false;
+	
+	if (!strncasecmp(newvalue, "unsafe:", 7))
+	{
+		newvalue += 7;
+		unsafe = true;
+	}
 	
 	const int val = atoi(newvalue);
 	if (val < ROCKMINER_MIN_FREQ_MHZ || val > ROCKMINER_MAX_FREQ_MHZ)
 		return "Invalid clock speed";
+	else
+	if (val > ROCKMINER_MAX_SAFE_FREQ_MHZ && !unsafe)
+		return "Dangerous clock speed (use \"unsafe:N\" to force)";
 	
 	applog(LOG_DEBUG, "%"PRIpreprv": Changing clock frequency for future jobs to %d MHz", proc->proc_repr, val);
 	rockminer_job_buf_set_freq(chip->next_work_req, val);

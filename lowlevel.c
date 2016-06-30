@@ -1,5 +1,5 @@
 /*
- * Copyright 2012-2013 Luke Dashjr
+ * Copyright 2012-2014 Luke Dashjr
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -106,6 +106,11 @@ struct lowlevel_device_info *lowlevel_scan()
 	
 #ifdef USE_NANOFURY
 	devinfo_mid_list = lowl_mcp2210.devinfo_scan();
+	LL_CONCAT(devinfo_list, devinfo_mid_list);
+#endif
+	
+#ifdef NEED_BFG_LOWL_MSWIN
+	devinfo_mid_list = lowl_mswin.devinfo_scan();
 	LL_CONCAT(devinfo_list, devinfo_mid_list);
 #endif
 	

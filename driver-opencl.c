@@ -1,6 +1,7 @@
 /*
- * Copyright 2011-2012 Con Kolivas
- * Copyright 2011-2013 Luke Dashjr
+ * Copyright 2011-2013 Con Kolivas
+ * Copyright 2011-2014 Luke Dashjr
+ * Copyright 2014 Nate Woolls
  * Copyright 2010 Jeff Garzik
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -1282,7 +1283,7 @@ void *reinit_gpu(void *userdata)
 
 select_cgpu:
 	sel_cgpu =
-	cgpu = tq_pop(mythr->q, NULL);
+	cgpu = tq_pop(mythr->q);
 	if (!cgpu)
 		goto out;
 	

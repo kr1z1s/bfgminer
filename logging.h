@@ -1,5 +1,5 @@
 /*
- * Copyright 2013 Luke Dashjr
+ * Copyright 2013-2014 Luke Dashjr
  * Copyright 2012 zefir
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -133,7 +133,6 @@ extern void _bfg_clean_up(bool);
 	if (fmt) { \
 		fprintf(stderr, "\n" fmt, ##__VA_ARGS__);  \
 	} \
-	fprintf(stderr, "\n");  \
 	fflush(stderr);  \
 	_quit(status); \
 } while (0)

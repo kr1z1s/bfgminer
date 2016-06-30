@@ -3,6 +3,7 @@
  * Copyright 2013 Andrew Smith
  * Copyright 2013 Con Kolivas
  * Copyright 2013 Chris Savery
+ * Copyright 2013-2014 Luke Dashjr
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -695,6 +696,19 @@ static void kln_disable(struct cgpu_info *klncgpu, int dev, bool all)
 		kline.hd.dev = i;
 		SendCmd(klncgpu, &kline, KSENDHD(1));
 	}
+}
+
+static
+void klondike_zero_stats(struct cgpu_info * const proc)
+{
+	struct klondike_info * const klninfo = proc->device_data;
+	
+	for (int devn = klninfo->status[0].kline.ws.slavecount; devn >= 0; --devn)
+		for (int i = klninfo->status[devn].kline.ws.chipcount * 2; --i >= 0; )
+			klninfo->devinfo[devn].chipstats[i] = 0;
+	klninfo->hashcount = klninfo->errorcount = klninfo->noisecount = 0;
+	klninfo->delay_count = klninfo->delay_total = klninfo->delay_min = klninfo->delay_max = 0;
+	klninfo->nonce_count = klninfo->nonce_total = klninfo->nonce_min = klninfo->nonce_max = 0;
 }
 
 static bool klondike_init(struct cgpu_info *klncgpu)
@@ -1702,6 +1716,7 @@ struct device_drv klondike_drv = {
 	.thread_shutdown = klondike_shutdown,
 	.thread_enable = klondike_thread_enable,
 	
+	.zero_stats = klondike_zero_stats,
 #ifdef HAVE_CURSES
 	.proc_wlogprint_status = klondike_wlogprint_status,
 #endif

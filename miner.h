@@ -1,5 +1,6 @@
 /*
- * Copyright 2012-2013 Luke Dashjr
+ * Copyright 2012-2014 Luke Dashjr
+ * Copyright 2014 Nate Woolls
  * Copyright 2011-2013 Con Kolivas
  * Copyright 2012-2013 Andrew Smith
  * Copyright 2011 Glenn Francis Murray
@@ -316,6 +317,7 @@ struct device_drv {
 	void (*proc_wlogprint_status)(struct cgpu_info *);
 	void (*proc_tui_wlogprint_choices)(struct cgpu_info *);
 	const char *(*proc_tui_handle_choice)(struct cgpu_info *, int input);
+	void (*zero_stats)(struct cgpu_info *);
 
 	// Thread-specific functions
 	bool (*thread_prepare)(struct thr_info *);
@@ -1057,6 +1059,8 @@ extern bool stale_work_future(struct work *, bool share, unsigned long ustime);
 extern void set_target_to_pdiff(void *dest_target, double pdiff);
 #define bdiff_to_pdiff(n) (n * 1.0000152587)
 extern void set_target_to_bdiff(void *dest_target, double bdiff);
+#define pdiff_to_bdiff(n) (n * 0.9999847412109375)
+extern double target_diff(const unsigned char *target);
 
 extern void kill_work(void);
 extern void app_restart(void);
@@ -1194,8 +1198,8 @@ struct bfg_tmpl_ref {
 struct ntime_roll_limits {
 	uint32_t min;
 	uint32_t max;
-	uint16_t minoff;
-	uint16_t maxoff;
+	int16_t minoff;
+	int16_t maxoff;
 };
 
 struct stratum_work {
@@ -1340,6 +1344,9 @@ struct pool {
 	bool stratum_init;
 	bool stratum_notify;
 	struct stratum_work swork;
+	uint8_t next_target[0x20];
+	char *next_nonce1;
+	int next_n2size;
 	pthread_t stratum_thread;
 	pthread_mutex_t stratum_lock;
 	char *admin_msg;
@@ -1485,6 +1492,8 @@ extern double cgpu_utility(struct cgpu_info *);
 extern void kill_work(void);
 extern int prioritize_pools(char *param, int *pid);
 extern void validate_pool_priorities(void);
+extern void enable_pool(struct pool *);
+extern void disable_pool(struct pool *, enum pool_enable);
 extern void switch_pools(struct pool *selected);
 extern void remove_pool(struct pool *pool);
 extern void write_config(FILE *fcfg);
@@ -1499,7 +1508,7 @@ extern bool pool_may_redirect_to(struct pool *, const char *uri);
 extern struct thread_q *tq_new(void);
 extern void tq_free(struct thread_q *tq);
 extern bool tq_push(struct thread_q *tq, void *data);
-extern void *tq_pop(struct thread_q *tq, const struct timespec *abstime);
+extern void *tq_pop(struct thread_q *);
 extern void tq_freeze(struct thread_q *tq);
 extern void tq_thaw(struct thread_q *tq);
 extern bool successful_connect;
@@ -1509,6 +1518,7 @@ extern void clean_work(struct work *work);
 extern void free_work(struct work *work);
 extern void __copy_work(struct work *work, const struct work *base_work);
 extern struct work *copy_work(const struct work *base_work);
+extern const char *bfg_workpadding_bin;
 extern void set_simple_ntime_roll_limit(struct ntime_roll_limits *, uint32_t ntime_base, int ntime_roll);
 extern void work_set_simple_ntime_roll_limit(struct work *, int ntime_roll);
 extern void work_hash(struct work *);

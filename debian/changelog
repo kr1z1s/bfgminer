@@ -1,3 +1,48 @@
+bfgminer (4.7.2-0precise1) precise; urgency=low
+
+  * Bug fixes only.
+
+ -- Luke Dashjr <luke+bfgminer@dashjr.org>  Sun, 05 Oct 2014 05:59:03 -0000
+
+bfgminer (4.7.1-0precise1) precise; urgency=low
+
+  * Bug fixes only.
+
+ -- Luke Dashjr <luke+bfgminer@dashjr.org>  Wed, 10 Sep 2014 04:33:12 -0000
+
+bfgminer (4.7.0-0precise1) precise; urgency=low
+
+  * avalonmm: Guess sensible defaults when user does not specify clock/voltage.
+  * minergate: New driver supporting the Spondoolies SP10.
+  * Stratum: Support for mining.set_extranonce extension; put "#xnsub" at the end of the pool URI to enable.
+
+ -- Luke Dashjr <luke+bfgminer@dashjr.org>  Sun, 17 Aug 2014 02:08:49 -0000
+
+bfgminer (4.6.0-0precise1) precise; urgency=low
+
+  * avalonmm: New driver for both Avalon2 and Avalon3 rigs.
+
+ -- Luke Dashjr <luke+bfgminer@dashjr.org>  Sat, 02 Aug 2014 03:10:10 -0000
+
+bfgminer (4.5.0-0precise1) precise; urgency=low
+
+  * bitforce: A new setup-vfio shell script is included to simplify configuring VFIO for Monarchs on PCIe.
+  * cairnsmore, icarus, zeusminer: Per-core mining statistics support.
+  * gridseed: Ability to set clock speed via Manage TUI.
+  * hashfast: Include chip/core address in RPC procdetails.
+  * hashfast: Implement ability to change clock setting at runtime.
+  * rockminer: Allow setting clock 300-2560 as long as prefixed by "unsafe:".
+  * zeusminer: Support for the GAW War Machine.
+  * zeusminer: Ability to set clock speed via Manage TUI.
+
+ -- Luke Dashjr <luke+bfgminer@dashjr.org>  Sat, 26 Jul 2014 16:26:25 -0000
+
+bfgminer (4.4.0-0precise1) precise; urgency=low
+
+  * getwork and stratum proxy drivers: Proxy-share difficulty is now adjustable using --set pxy:diff=N and/or --set pxy@username:diff=N
+
+ -- Luke Dashjr <luke+bfgminer@dashjr.org>  Mon, 07 Jul 2014 16:34:42 -0000
+
 bfgminer (4.3.0-0precise1) precise; urgency=low
 
   * URI parameter #getcbaddr to request coinbase address from bitcoind or compatible servers for solo mining.

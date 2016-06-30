@@ -1,4 +1,4 @@
-# Copyright 2012-2013 Luke Dashjr
+# Copyright 2012-2014 Luke Dashjr
 # Copyright 2012 zefir
 # Copyright 2011-2013 Con Kolivas
 # Copyright 2013 James Z.M. Gao
@@ -41,31 +41,39 @@ INCLUDES	= -fno-strict-aliasing
 
 bin_PROGRAMS	= bfgminer
 
+sbin_SCRIPTS =
+
 if HAVE_WINDOWS
 else
 bin_SCRIPTS = start-bfgminer.sh
 endif
 
-bfgminer_LDFLAGS	= $(PTHREAD_FLAGS)
-bfgminer_LDADD	= $(DLOPEN_FLAGS) @LIBCURL_LIBS@ @JANSSON_LIBS@ @PTHREAD_LIBS@ \
+# first, our own stuff
+bfgminer_LDADD    = lib/libgnu.a ccan.bfg/libccan.a
+bfgminer_LDFLAGS  =
+bfgminer_CPPFLAGS = -I$(top_builddir)/lib -I$(top_srcdir)/lib -I$(top_srcdir)/ccan-upstream
+
+# second, potentially embedded libs
+bfgminer_LDADD    += $(libblkmaker_LIBS)
+bfgminer_LDFLAGS  += $(libblkmaker_LDFLAGS)
+bfgminer_CPPFLAGS += $(libblkmaker_CFLAGS)
+
+# finally, everything else
+bfgminer_LDFLAGS += $(PTHREAD_FLAGS)
+bfgminer_LDADD   += $(DLOPEN_FLAGS) @LIBCURL_LIBS@ @JANSSON_LIBS@ @PTHREAD_LIBS@ \
 		  @NCURSES_LIBS@ @PDCURSES_LIBS@ @WS2_LIBS@ \
 		  @UDEV_LIBS@ @LIBUSB_LIBS@ @MM_LIBS@ @RT_LIBS@ \
-		  @MATH_LIBS@ lib/libgnu.a ccan.bfg/libccan.a
-bfgminer_CPPFLAGS = -I$(top_builddir)/lib -I$(top_srcdir)/lib @LIBUSB_CFLAGS@ @LIBCURL_CFLAGS@
+                    $(MATH_LIBS)
+bfgminer_CPPFLAGS += @LIBUSB_CFLAGS@ @LIBCURL_CFLAGS@
 
 bfgminer_CPPFLAGS += -DCGMINER_PREFIX='"$(pkgdatadir)"'
 
-bfgminer_CPPFLAGS += -I$(top_srcdir)/ccan-upstream
 bfgminer_CPPFLAGS += @JANSSON_CFLAGS@
 bfgminer_CPPFLAGS += $(PTHREAD_FLAGS)
 bfgminer_CPPFLAGS += $(NCURSES_CPPFLAGS)
 
 bfgminer_CPPFLAGS += $(AUTOSCAN_CPPFLAGS)
 bfgminer_LDADD += $(AUTOSCAN_LIBS)
-
-bfgminer_LDADD += $(libblkmaker_LIBS)
-bfgminer_LDFLAGS += $(libblkmaker_LDFLAGS)
-bfgminer_CPPFLAGS += $(libblkmaker_CFLAGS)
 
 # common sources
 bfgminer_SOURCES := miner.c
@@ -75,6 +83,14 @@ bfgminer_SOURCES += miner.h compat.h  \
 		   util.c util.h logging.h		\
 		   sha2.c sha2.h api.c
 EXTRA_bfgminer_DEPENDENCIES =
+
+.PHONY: update-version
+update-version:
+	./gen-version.sh >version.h.new
+	cmp version.h version.h.new && rm version.h.new || mv version.h.new version.h
+version.h: update-version
+bfgminer_SOURCES += version.h
+BUILT_SOURCES = version.h
 
 SUBDIRS += $(LIBBLKMAKER_SUBDIRS)
 LIBBLKMAKER_SUBDIRS =
@@ -219,12 +235,6 @@ endif
 
 if HAS_BITFORCE
 bfgminer_SOURCES += driver-bitforce.c
-
-if HAVE_WINDOWS
-else
-bin_PROGRAMS += bitforce-firmware-flash
-bitforce_firmware_flash_SOURCES = bitforce-firmware-flash.c
-endif
 endif
 
 if HAS_BIGPIC
@@ -268,6 +278,10 @@ endif
 
 if HAS_AVALON
 bfgminer_SOURCES += driver-avalon.c driver-avalon.h hexdump.c
+endif
+
+if USE_AVALONMM
+bfgminer_SOURCES += driver-avalonmm.c
 endif
 
 if USE_KNC
@@ -331,6 +345,15 @@ if USE_HASHFAST
 bfgminer_SOURCES += driver-hashfast.c
 endif
 
+if USE_JINGTIAN
+bfgminer_SOURCES += driver-aan.c driver-aan.h
+bfgminer_SOURCES += driver-jingtian.c
+endif
+
+if USE_MINERGATE
+bfgminer_SOURCES += driver-minergate.c
+endif
+
 if USE_ROCKMINER
 bfgminer_SOURCES += driver-rockminer.c
 endif
@@ -344,8 +367,16 @@ bfgminer_SOURCES += lowl-hid.c lowl-hid.h
 bfgminer_CPPFLAGS += $(hidapi_CFLAGS)
 endif
 
+if NEED_BFG_LOWL_MSWIN
+bfgminer_SOURCES += lowl-mswin.c lowl-mswin.h
+endif
+
 if NEED_BFG_LOWL_PCI
 bfgminer_SOURCES += lowl-pci.c lowl-pci.h
+
+if USE_VFIO
+sbin_SCRIPTS += setup-vfio
+endif
 endif
 
 if NEED_BFG_LOWL_SPI

@@ -1,5 +1,6 @@
 /*
- * Copyright 2012-2013 Luke Dashjr
+ * Copyright 2012-2014 Luke Dashjr
+ * Copyright 2014 Nate Woolls
  * Copyright 2012 Xiangfu
  * Copyright 2012 Andrew Smith
  *
@@ -136,7 +137,7 @@ struct ICARUS_INFO {
 #ifdef USE_ZEUSMINER
 	// Hardware information, doesn't affect anything directly
 	uint16_t freq;
-	uint8_t chips;
+	uint16_t chips;
 #endif
 };
 

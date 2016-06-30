@@ -1,6 +1,7 @@
 /*
- * Copyright 2011-2013 Con Kolivas
- * Copyright 2011-2013 Luke Dashjr
+ * Copyright 2011-2014 Con Kolivas
+ * Copyright 2011-2014 Luke Dashjr
+ * Copyright 2014 Nate Woolls
  * Copyright 2012-2013 Andrew Smith
  * Copyright 2010 Jeff Garzik
  *
@@ -99,6 +100,8 @@
 #include "scrypt.h"
 #endif
 
+#include "version.h"
+
 #if defined(USE_AVALON) || defined(USE_BITFORCE) || defined(USE_ICARUS) || defined(USE_MODMINER) || defined(USE_NANOFURY) || defined(USE_X6500) || defined(USE_ZTEX)
 #	define USE_FPGA
 #endif
@@ -123,14 +126,15 @@ static char packagename[256];
 
 bool opt_protocol;
 bool opt_dev_protocol;
-static bool opt_load_bitcoin_conf = true;
 static bool opt_benchmark;
 static bool want_longpoll = true;
 static bool want_gbt = true;
 static bool want_getwork = true;
 #if BLKMAKER_VERSION > 1
+static bool opt_load_bitcoin_conf = true;
 static bool have_at_least_one_getcbaddr;
 static bytes_t opt_coinbase_script = BYTES_INIT;
+static uint32_t coinbase_script_block_id;
 static uint32_t template_nonce;
 #endif
 #if BLKMAKER_VERSION > 0
@@ -531,6 +535,8 @@ static void applog_and_exit(const char *fmt, ...)
 char *devpath_to_devid(const char *devpath)
 {
 #ifndef WIN32
+	if (devpath[0] != '/')
+		return NULL;
 	struct stat my_stat;
 	if (stat(devpath, &my_stat))
 		return NULL;
@@ -1041,8 +1047,6 @@ void adjust_quota_gcd(void)
 	applog(LOG_DEBUG, "Global quota greatest common denominator set to %lu", gcd);
 }
 
-static void enable_pool(struct pool *);
-
 /* Return value is ignored if not called from add_pool_details */
 struct pool *add_pool(void)
 {
@@ -1089,6 +1093,9 @@ struct pool *add_pool(void)
 	adjust_quota_gcd();
 	
 	enable_pool(pool);
+	
+	if (!currentpool)
+		currentpool = pool;
 
 	return pool;
 }
@@ -1097,8 +1104,10 @@ static
 void pool_set_uri(struct pool * const pool, char * const uri)
 {
 	pool->rpc_url = uri;
+#if BLKMAKER_VERSION > 1
 	if (uri_get_param_bool(uri, "getcbaddr", false))
 		have_at_least_one_getcbaddr = true;
+#endif
 }
 
 /* Pool variant of test and set */
@@ -2219,8 +2228,12 @@ static struct opt_table opt_config_table[] = {
 #endif
 	),
 	OPT_WITHOUT_ARG("--no-local-bitcoin",
+#if BLKMAKER_VERSION > 1
 	                opt_set_invbool, &opt_load_bitcoin_conf,
 	                "Disable adding pools for local bitcoin RPC servers"),
+#else
+	                set_null, NULL, opt_hidden),
+#endif
 	OPT_WITHOUT_ARG("--no-longpoll",
 			opt_set_invbool, &want_longpoll,
 			"Disable X-Long-Polling support"),
@@ -2800,7 +2813,8 @@ void free_work(struct work *work)
 	free(work);
 }
 
-static const char *workpadding_bin = "\0\0\0\x80\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x80\x02\0\0";
+const char *bfg_workpadding_bin = "\0\0\0\x80\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x80\x02\0\0";
+#define workpadding_bin  bfg_workpadding_bin
 
 // Must only be called with ch_lock held!
 static
@@ -2880,6 +2894,7 @@ void work_set_simple_ntime_roll_limit(struct work * const work, const int ntime_
 	set_simple_ntime_roll_limit(&work->ntime_roll_limits, upk_u32be(work->data, 0x44), ntime_roll);
 }
 
+#if BLKMAKER_VERSION > 1
 static
 void refresh_bitcoind_address(const bool fresh)
 {
@@ -2911,11 +2926,19 @@ void refresh_bitcoind_address(const bool fresh)
 			}
 		}
 		json = json_rpc_call(curl, pool->rpc_url, pool->rpc_userpass, getcbaddr_req, false, false, NULL, pool, true);
-		j2 = json_object_get(json, "error");
-		if (unlikely(!json_is_null(j2)))
+		if (unlikely((!json) || !json_is_null( (j2 = json_object_get(json, "error")) )))
 		{
+			const char *estrc;
 			char *estr = NULL;
-			applog(LOG_WARNING, "Error %cetting coinbase address from pool %d: %s", 'g', pool->pool_no, json_string_value(j2) ?: (estr = json_dumps_ANY(j2, JSON_ENSURE_ASCII | JSON_SORT_KEYS)));
+			if (!(json && j2))
+				estrc = NULL;
+			else
+			{
+				estrc = json_string_value(j2);
+				if (!estrc)
+					estrc = estr = json_dumps_ANY(j2, JSON_ENSURE_ASCII | JSON_SORT_KEYS);
+			}
+			applog(LOG_WARNING, "Error %cetting coinbase address from pool %d: %s", 'g', pool->pool_no, estrc);
 			free(estr);
 			continue;
 		}
@@ -2937,6 +2960,7 @@ void refresh_bitcoind_address(const bool fresh)
 			break;
 		}
 		bytes_assimilate(&opt_coinbase_script, &newscript);
+		coinbase_script_block_id = current_block_id;
 		applog(LOG_NOTICE, "Now using coinbase address %s, provided by pool %d", s, pool->pool_no);
 		break;
 	}
@@ -2945,8 +2969,7 @@ void refresh_bitcoind_address(const bool fresh)
 	if (curl)
 		curl_easy_cleanup(curl);
 }
-
-static double target_diff(const unsigned char *);
+#endif
 
 #define GBT_XNONCESZ (sizeof(uint32_t))
 
@@ -2981,12 +3004,9 @@ static bool work_decode(struct pool *pool, struct work *work, json_t *val)
 		}
 		work->rolltime = blkmk_time_left(tmpl, tv_now.tv_sec);
 #if BLKMAKER_VERSION > 1
-		if ((!tmpl->cbtxn) && !bytes_len(&opt_coinbase_script))
-		{
-			// We are about to fail here because we lack a coinbase transaction
-			// Try to get an address from bitcoind to use to avoid this
+		const uint32_t tmpl_block_id = ((uint32_t*)tmpl->prevblk)[0];
+		if ((!tmpl->cbtxn) && coinbase_script_block_id != tmpl_block_id)
 			refresh_bitcoind_address(false);
-		}
 		if (bytes_len(&opt_coinbase_script))
 		{
 			bool newcb;
@@ -3968,6 +3988,15 @@ void bfg_hline(WINDOW *win, int y)
 		mvwhline(win, y, 0, '-', maxx);
 }
 
+static
+int bfg_win_linelen(WINDOW * const win)
+{
+	int maxx;
+	int __maybe_unused y;
+	getmaxyx(win, y, maxx);
+	return maxx;
+}
+
 // Spaces until end of line, using current attributes (ie, not completely clear)
 static
 void bfg_wspctoeol(WINDOW * const win, const int offset)
@@ -4016,7 +4045,18 @@ static void curses_print_status(const int ts)
 	efficiency = total_bytes_xfer ? total_diff_accepted * 2048. / total_bytes_xfer : 0.0;
 
 	wattron(statuswin, attr_title);
-	cg_mvwprintw(statuswin, 0, 0, " " PACKAGE " version " VERSION " - Started: %s", datestamp);
+	const int linelen = bfg_win_linelen(statuswin);
+	int titlelen = 1 + strlen(PACKAGE) + 1 + strlen(VERSION) + 3 + 21 + 3 + 19;
+	cg_mvwprintw(statuswin, 0, 0, " " PACKAGE " ");
+	if (titlelen + 17 < linelen)
+		cg_wprintw(statuswin, "version ");
+	cg_wprintw(statuswin, VERSION " - ");
+	if (titlelen + 9 < linelen)
+		cg_wprintw(statuswin, "Started: ");
+	else
+	if (titlelen + 7 <= linelen)
+		cg_wprintw(statuswin, "Start: ");
+	cg_wprintw(statuswin, "%s", datestamp);
 	timer_set_now(&now);
 	{
 		unsigned int days, hours;
@@ -4407,7 +4447,7 @@ void logwin_update(void)
 }
 #endif
 
-static void enable_pool(struct pool *pool)
+void enable_pool(struct pool * const pool)
 {
 	if (pool->enabled != POOL_ENABLED) {
 		mutex_lock(&lp_lock);
@@ -4418,20 +4458,27 @@ static void enable_pool(struct pool *pool)
 	}
 }
 
-#ifdef HAVE_CURSES
-static void disable_pool(struct pool *pool)
+void disable_pool(struct pool * const pool, const enum pool_enable enable_status)
 {
-	if (pool->enabled == POOL_ENABLED)
-		enabled_pools--;
-	pool->enabled = POOL_DISABLED;
-}
-#endif
-
-static void reject_pool(struct pool *pool)
-{
-	if (pool->enabled == POOL_ENABLED)
-		enabled_pools--;
-	pool->enabled = POOL_REJECTING;
+	if (pool->enabled == POOL_DISABLED)
+		/* had been manually disabled before */
+		return;
+	
+	if (pool->enabled != POOL_ENABLED)
+	{
+		/* has been programmatically disabled already, just change to the new status directly */
+		pool->enabled = enable_status;
+		return;
+	}
+	
+	/* Fall into the lock area */
+	mutex_lock(&lp_lock);
+	--enabled_pools;
+	pool->enabled = enable_status;
+	mutex_unlock(&lp_lock);
+	
+	if (pool == current_pool())
+		switch_pools(NULL);
 }
 
 static double share_diff(const struct work *);
@@ -4621,9 +4668,7 @@ share_result(json_t *val, json_t *res, json_t *err, const struct work *work,
 			if (pool->seq_rejects > utility * 3) {
 				applog(LOG_WARNING, "Pool %d rejected %d sequential shares, disabling!",
 				       pool->pool_no, pool->seq_rejects);
-				reject_pool(pool);
-				if (pool == current_pool())
-					switch_pools(NULL);
+				disable_pool(pool, POOL_REJECTING);
 				pool->seq_rejects = 0;
 			}
 		}
@@ -4865,9 +4910,9 @@ static inline struct pool *select_pool(bool lagging)
 	bool avail = false;
 	int tested, i;
 
+retry:
 	cp = current_pool();
 
-retry:
 	if (pool_strategy == POOL_BALANCE) {
 		pool = select_balanced(cp);
 		if (pool_unworkable(pool))
@@ -4949,7 +4994,7 @@ out:
 
 static double DIFFEXACTONE = 26959946667150639794667015087019630673637144422540572481103610249215.0;
 
-static double target_diff(const unsigned char *target)
+double target_diff(const unsigned char *target)
 {
 	double targ = 0;
 	signed int i;
@@ -5844,7 +5889,6 @@ void work_check_for_block(struct work * const work)
 		found_blocks++;
 		work->mandatory = true;
 		applog(LOG_NOTICE, "Found block for pool %d!", work->pool->pool_no);
-		refresh_bitcoind_address(true);
 	}
 }
 
@@ -6427,10 +6471,10 @@ void switch_pools(struct pool *selected)
 	if (pool_unusable(pool) && failover_pool)
 		pool = failover_pool;
 	currentpool = pool;
+	cg_wunlock(&control_lock);
 	mutex_lock(&lp_lock);
 	pthread_cond_broadcast(&lp_cond);
 	mutex_unlock(&lp_lock);
-	cg_wunlock(&control_lock);
 
 	/* Set the lagging flag to avoid pool not providing work fast enough
 	 * messages in failover only mode since  we have to get all fresh work
@@ -6877,6 +6921,8 @@ void remove_pool(struct pool *pool)
 	int i, last_pool = total_pools - 1;
 	struct pool *other;
 
+	disable_pool(pool, POOL_DISABLED);
+	
 	/* Boost priority of any lower prio than this one */
 	for (i = 0; i < total_pools; i++) {
 		other = pools[i];
@@ -6971,6 +7017,10 @@ void write_config(FILE *fcfg)
 	for(i = 0; i < total_pools; i++) {
 		struct pool *pool = pools[i];
 
+		if (pool->failover_only)
+			// Don't write failover-only (automatically added) pools to the config file for now
+			continue;
+		
 		if (pool->quota != 1) {
 			fprintf(fcfg, "%s\n\t{\n\t\t\"quota\" : \"%d;%s\",", i > 0 ? "," : "",
 				pool->quota,
@@ -7206,6 +7256,9 @@ void zero_stats(void)
 		cgpu->cgminer_stats.getwork_wait_max.tv_sec = 0;
 		cgpu->cgminer_stats.getwork_wait_max.tv_usec = 0;
 		mutex_unlock(&hash_lock);
+		
+		if (cgpu->drv->zero_stats)
+			cgpu->drv->zero_stats(cgpu);
 	}
 }
 
@@ -7300,7 +7353,6 @@ retry:
 			wlogprint("Unable to remove pool due to activity\n");
 			goto retry;
 		}
-		disable_pool(pool);
 		remove_pool(pool);
 		goto updated;
 	} else if (!strncasecmp(&input, "s", 1)) {
@@ -7325,9 +7377,7 @@ retry:
 			goto retry;
 		}
 		pool = pools[selected];
-		disable_pool(pool);
-		if (pool == current_pool())
-			switch_pools(NULL);
+		disable_pool(pool, POOL_DISABLED);
 		goto updated;
 	} else if (!strncasecmp(&input, "e", 1)) {
 		selected = curses_int("Select pool number");
@@ -9040,7 +9090,7 @@ out:
 
 static void pool_resus(struct pool *pool)
 {
-	if (pool_strategy == POOL_FAILOVER && pool->prio < cp_prio())
+	if (pool->enabled == POOL_ENABLED && pool_strategy == POOL_FAILOVER && pool->prio < cp_prio())
 		applog(LOG_WARNING, "Pool %d %s alive, testing stability", pool->pool_no, pool->rpc_url);
 	else
 		applog(LOG_INFO, "Pool %d %s alive", pool->pool_no, pool->rpc_url);
@@ -9500,6 +9550,7 @@ void _submit_work_async(struct work *work)
 		work_check_for_block(work);
 		share_result(jn, jn, jn, work, false, "");
 		free_work(work);
+		json_decref(jn);
 		return;
 	}
 
@@ -9566,7 +9617,7 @@ bool test_hash(const void * const phash, const float diff)
 		// FIXME: > 1 should check more
 		return !hash[7];
 	
-	const uint32_t Htarg = (uint32_t)(0x100000000 * diff) - 1;
+	const uint32_t Htarg = (uint32_t)ceil((1. / diff) - 1);
 	const uint32_t tmp_hash7 = le32toh(hash[7]);
 	
 	applog(LOG_DEBUG, "htarget %08lx hash %08lx",
@@ -9592,11 +9643,11 @@ enum test_nonce2_result _test_nonce2(struct work *work, uint32_t nonce, bool che
 		if (pool->stratum_active)
 		{
 			// Some stratum pools are buggy and expect difficulty changes to be immediate retroactively, so if the target has changed, check and submit just in case
-			if (memcmp(pool->swork.target, work->target, sizeof(work->target)))
+			if (memcmp(pool->next_target, work->target, sizeof(work->target)))
 			{
 				applog(LOG_DEBUG, "Stratum pool %u target has changed since work job issued, checking that too",
 				       pool->pool_no);
-				if (hash_target_check_v(work->hash, pool->swork.target))
+				if (hash_target_check_v(work->hash, pool->next_target))
 					high_hash = false;
 			}
 		}
@@ -9674,12 +9725,17 @@ out:
 	return ret;
 }
 
-bool abandon_work(struct work *work, struct timeval *wdiff, uint64_t hashes)
+// return true of we should stop working on this piece of work
+// returning false means we will keep scanning for a nonce
+// assumptions: work->blk.nonce is the number of nonces completed in the work
+// see minerloop_scanhash comments for more details & usage
+bool abandon_work(struct work *work, struct timeval *wdiff, uint64_t max_hashes)
 {
-	if (wdiff->tv_sec > opt_scantime ||
-	    work->blk.nonce >= 0xfffffffe - hashes ||
-	    hashes >= 0xfffffffe ||
-	    stale_work(work, false))
+	if (work->blk.nonce == 0xffffffff ||                // known we are scanning a full nonce range
+	    wdiff->tv_sec > opt_scantime ||                 // scan-time has elapsed (user specified, default 60s)
+	    work->blk.nonce >= 0xfffffffe - max_hashes ||   // are there enough nonces left in the work
+	    max_hashes >= 0xfffffffe ||                     // assume we are scanning a full nonce range
+	    stale_work(work, false))                        // work is stale
 		return true;
 	return false;
 }
@@ -10321,8 +10377,8 @@ static void *watchpool_thread(void __maybe_unused *userdata)
 			/* Only switch pools if the failback pool has been
 			 * alive for more than 5 minutes (default) to prevent
 			 * intermittently failing pools from being used. */
-			if (!pool->idle && pool_strategy == POOL_FAILOVER && pool->prio < cp_prio() &&
-			    now.tv_sec - pool->tv_idle.tv_sec > opt_fail_switch_delay) {
+			if (!pool->idle && pool->enabled == POOL_ENABLED && pool_strategy == POOL_FAILOVER && pool->prio < cp_prio() && now.tv_sec - pool->tv_idle.tv_sec > opt_fail_switch_delay)
+			{
 				if (opt_fail_switch_delay % 60)
 					applog(LOG_WARNING, "Pool %d %s stable for %d second%s",
 					       pool->pool_no, pool->rpc_url,
@@ -10997,13 +11053,14 @@ out:
 }
 #endif
 
+#if BLKMAKER_VERSION > 1
 static
 bool _add_local_gbt(const char * const filepath, void *userp)
 {
 	const bool * const live_p = userp;
 	struct pool *pool;
 	char buf[0x100];
-	char *rpcuser = NULL, *rpcpass = NULL;
+	char *rpcuser = NULL, *rpcpass = NULL, *rpcconnect = NULL;
 	int rpcport = 0, rpcssl = -101;
 	FILE * const F = fopen(filepath, "r");
 	if (!F)
@@ -11023,8 +11080,11 @@ bool _add_local_gbt(const char * const filepath, void *userp)
 		if (!strncasecmp(buf, "rpcssl=", 7))
 			rpcssl = atoi(&buf[7]);
 		else
+		if (!strncasecmp(buf, "rpcconnect=", 11))
+			rpcconnect = trimmed_strdup(&buf[11]);
+		else
 			continue;
-		if (rpcuser && rpcpass && rpcport && rpcssl != -101)
+		if (rpcuser && rpcpass && rpcport && rpcssl != -101 && rpcconnect)
 			break;
 	}
 	
@@ -11045,11 +11105,30 @@ err:
 	if (rpcssl == -101)
 		rpcssl = 0;
 	
+	const bool have_cbaddr = bytes_len(&opt_coinbase_script);
+	
 	const int uri_sz = 0x30;
 	char * const uri = malloc(uri_sz);
-	snprintf(uri, uri_sz, "http%s://localhost:%d/#getcbaddr#allblocks", rpcssl ? "s" : "", rpcport);
+	snprintf(uri, uri_sz, "http%s://%s:%d/%s#allblocks", rpcssl ? "s" : "", rpcconnect ?: "localhost", rpcport, have_cbaddr ? "" : "#getcbaddr");
 	
-	applog(LOG_DEBUG, "Local bitcoin RPC server on port %d found in %s", rpcport, filepath);
+	char hfuri[0x40];
+	if (rpcconnect)
+		snprintf(hfuri, sizeof(hfuri), "%s:%d", rpcconnect, rpcport);
+	else
+		snprintf(hfuri, sizeof(hfuri), "port %d", rpcport);
+	applog(LOG_DEBUG, "Local bitcoin RPC server on %s found in %s", hfuri, filepath);
+	
+	for (int i = 0; i < total_pools; ++i)
+	{
+		struct pool *pool = pools[i];
+		
+		if (!(strcmp(pool->rpc_url, uri) || strcmp(pool->rpc_pass, rpcpass)))
+		{
+			applog(LOG_DEBUG, "Server on %s is already configured, not adding as failover", hfuri);
+			free(uri);
+			goto err;
+		}
+	}
 	
 	pool = add_pool();
 	if (!pool)
@@ -11066,7 +11145,7 @@ err:
 	pool->failover_only = true;
 	add_pool_details(pool, *live_p, uri, rpcuser, rpcpass);
 	
-	applog(LOG_NOTICE, "Added local bitcoin RPC server on port %d as pool %d", rpcport, pool->pool_no);
+	applog(LOG_NOTICE, "Added local bitcoin RPC server on %s as pool %d", hfuri, pool->pool_no);
 	
 out:
 	return false;
@@ -11077,6 +11156,7 @@ void add_local_gbt(bool live)
 {
 	appdata_file_call("Bitcoin", "bitcoin.conf", _add_local_gbt, &live);
 }
+#endif
 
 #if defined(unix) || defined(__APPLE__)
 static void fork_monitor()
@@ -12067,8 +12147,15 @@ static void raise_fd_limits(void)
 #endif
 }
 
+static
+void bfg_atexit(void)
+{
+	puts("");
+}
+
 extern void bfg_init_threadlocal();
 extern void stratumsrv_start();
+extern void test_aan_pll(void);
 
 int main(int argc, char *argv[])
 {
@@ -12083,6 +12170,8 @@ int main(int argc, char *argv[])
 #ifdef WIN32
 	LoadLibrary("backtrace.dll");
 #endif
+	
+	atexit(bfg_atexit);
 
 	blkmk_sha256_impl = my_blkmaker_sha256_callback;
 
@@ -12320,6 +12409,9 @@ int main(int argc, char *argv[])
 		test_target();
 		test_uri_get_param();
 		utf8_test();
+#ifdef USE_JINGTIAN
+		test_aan_pll();
+#endif
 	}
 
 #ifdef HAVE_CURSES
@@ -12431,8 +12523,10 @@ int main(int argc, char *argv[])
 	switch_logsize();
 #endif
 
+#if BLKMAKER_VERSION > 1
 	if (opt_load_bitcoin_conf && !(opt_scrypt || opt_benchmark))
 		add_local_gbt(total_pools);
+#endif
 	
 	if (!total_pools) {
 		applog(LOG_WARNING, "Need to specify at least one pool server.");

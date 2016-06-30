@@ -1,7 +1,7 @@
 /*
- * Copyright 2011-2013 Andrew Smith
- * Copyright 2011-2013 Con Kolivas
- * Copyright 2012-2013 Luke Dashjr
+ * Copyright 2011-2014 Andrew Smith
+ * Copyright 2011-2014 Con Kolivas
+ * Copyright 2012-2014 Luke Dashjr
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -35,6 +35,7 @@
 #include "util.h"
 #include "driver-cpu.h" /* for algo_names[], TODO: re-factor dependency */
 #include "driver-opencl.h"
+#include "version.h"
 
 #define HAVE_AN_FPGA 1
 
@@ -1436,7 +1437,7 @@ static void devdetail_an(struct io_data *io_data, struct cgpu_info *cgpu, bool i
 	root = api_add_int(root, "Target Temperature", &cgpu->targettemp, false);
 	root = api_add_int(root, "Cutoff Temperature", &cgpu->cutofftemp, false);
 
-	if (cgpu->drv->get_api_extra_device_detail)
+	if ((per_proc || cgpu->procs <= 1) && cgpu->drv->get_api_extra_device_detail)
 		root = api_add_extra(root, cgpu->drv->get_api_extra_device_detail(cgpu));
 
 	root = print_data(root, buf, isjson, precom);
@@ -2328,7 +2329,7 @@ static void switchpool(struct io_data *io_data, __maybe_unused SOCKETTYPE c, cha
 
 	pool = pools[id];
 	pool->failover_only = false;
-	pool->enabled = POOL_ENABLED;
+	enable_pool(pool);
 	cg_runlock(&control_lock);
 	switch_pools(pool);
 
@@ -2447,7 +2448,7 @@ static void enablepool(struct io_data *io_data, __maybe_unused SOCKETTYPE c, cha
 	}
 
 	pool->failover_only = false;
-	pool->enabled = POOL_ENABLED;
+	enable_pool(pool);
 	if (pool->prio < current_pool()->prio)
 		switch_pools(pool);
 
@@ -2552,9 +2553,7 @@ static void disablepool(struct io_data *io_data, __maybe_unused SOCKETTYPE c, ch
 		return;
 	}
 
-	pool->enabled = POOL_DISABLED;
-	if (pool == current_pool())
-		switch_pools(NULL);
+	disable_pool(pool, POOL_DISABLED);
 
 	message(io_data, MSG_DISPOOL, id, NULL, isjson);
 }
@@ -2596,7 +2595,6 @@ static void removepool(struct io_data *io_data, __maybe_unused SOCKETTYPE c, cha
 		return;
 	}
 
-	pool->enabled = POOL_DISABLED;
 	rpc_url = escape_string(pool->rpc_url, isjson);
 	if (rpc_url != pool->rpc_url)
 		dofree = true;
@@ -4056,7 +4054,7 @@ void api(int api_thr_id)
 	bool addrok;
 	char group;
 	json_error_t json_err;
-	json_t *json_config;
+	json_t *json_config = NULL;
 	json_t *json_val;
 	bool isjson;
 	bool did, isjoin, firstjoin;

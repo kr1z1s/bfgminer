@@ -34,7 +34,10 @@
 BFG_REGISTER_DRIVER(zeusminer_drv)
 
 static
-const struct bfg_set_device_definition zeusminer_set_device_funcs[];
+const struct bfg_set_device_definition zeusminer_set_device_funcs_probe[];
+
+static
+const struct bfg_set_device_definition zeusminer_set_device_funcs_live[];
 
 // device helper functions
 
@@ -78,7 +81,9 @@ bool zeusminer_detect_one(const char *devpath)
 	*info = (struct ICARUS_INFO){
 		.baud = ZEUSMINER_IO_SPEED,
 		.timing_mode = MODE_DEFAULT,
-		.do_icarus_timing = true,
+		// if do_icarus_timing is true, the timing adjustment may
+		// result in a read_count that considers the device Idle
+		.do_icarus_timing = false,
 		.probe_read_count = 5,
 		.golden_nonce = scrypt_golden_nonce,
 		.chips = ZEUSMINER_CHIPS_COUNT,
@@ -86,7 +91,7 @@ bool zeusminer_detect_one(const char *devpath)
 	};
 	
 	//pick up any user-defined settings passed in via --set
-	drv_set_defaults(drv, zeusminer_set_device_funcs, info, devpath, detectone_meta_info.serial, 1);
+	drv_set_defaults(drv, zeusminer_set_device_funcs_probe, info, devpath, detectone_meta_info.serial, 1);
 	
 	info->work_division = upper_power_of_two_u32(info->chips * ZEUSMINER_CHIP_CORES);
 	info->fpga_count = info->chips * ZEUSMINER_CHIP_CORES;
@@ -101,7 +106,9 @@ bool zeusminer_detect_one(const char *devpath)
 	
 	info->golden_ob = scrypt_golden_ob;
 	
-	if (!icarus_detect_custom(devpath, drv, info))
+	if (!icarus_detect_custom(devpath, drv, info) &&
+		//ZM doesn't respond to detection 1 out of ~30 times
+		!icarus_detect_custom(devpath, drv, info))
 	{
 		free(info);
 		return false;
@@ -136,19 +143,29 @@ bool zeusminer_detect_one(const char *devpath)
 // must be set before probing the device
 
 static
-const char *zeusminer_set_clock(struct cgpu_info * const device, const char * const option, const char * const setting, char * const replybuf, enum bfg_set_device_replytype * const success)
+bool zeusminer_set_clock_freq(struct cgpu_info * const device, int const freq)
 {
 	struct ICARUS_INFO * const info = device->device_data;
-	
+
+	if (freq < ZEUSMINER_MIN_CLOCK || freq > ZEUSMINER_MAX_CLOCK)
+		return false;
+
+	info->freq = freq;
+
+	return true;
+}
+
+static
+const char *zeusminer_set_clock(struct cgpu_info * const device, const char * const option, const char * const setting, char * const replybuf, enum bfg_set_device_replytype * const success)
+{
 	int val = atoi(setting);
 	
-	if (val < ZEUSMINER_MIN_CLOCK || val > ZEUSMINER_MAX_CLOCK) {
+	if (!zeusminer_set_clock_freq(device, val))
+	{
 		sprintf(replybuf, "invalid clock: '%s' valid range %d-%d",
 		        setting, ZEUSMINER_MIN_CLOCK, ZEUSMINER_MAX_CLOCK);
 		return replybuf;
 	}
-	
-	info->freq = val;
 	
 	return NULL;
 }
@@ -173,11 +190,19 @@ const char *zeusminer_set_ignore_golden_nonce(struct cgpu_info * const device, c
 	return NULL;
 }
 
+// for setting clock and chips during probe / detect
 static
-const struct bfg_set_device_definition zeusminer_set_device_funcs[] = {
+const struct bfg_set_device_definition zeusminer_set_device_funcs_probe[] = {
 	{ "clock", zeusminer_set_clock, NULL },
 	{ "chips", zeusminer_set_chips, NULL },
 	{ "ignore_golden_nonce",zeusminer_set_ignore_golden_nonce, NULL },
+	{ NULL },
+};
+
+// for setting clock while mining
+static
+const struct bfg_set_device_definition zeusminer_set_device_funcs_live[] = {
+	{ "clock", zeusminer_set_clock, NULL },
 	{ NULL },
 };
 
@@ -195,6 +220,7 @@ bool zeusminer_thread_init(struct thr_info * const thr)
 	struct cgpu_info * const device = thr->cgpu;
 	
 	device->min_nonce_diff = 1./0x10000;
+	device->set_device_funcs = zeusminer_set_device_funcs_live;
 	
 	return icarus_init(thr);
 }
@@ -216,6 +242,72 @@ bool zeusminer_job_prepare(struct thr_info *thr, struct work *work, __maybe_unus
 	
 	return true;
 }
+
+// display the Chip # in the UI when viewing per-proc details
+static
+bool zeusminer_override_statline_temp2(char *buf, size_t bufsz, struct cgpu_info *device, __maybe_unused bool per_processor)
+{
+	if (per_processor && ((device->proc_id % ZEUSMINER_CHIP_CORES) == 0))
+	{
+		tailsprintf(buf, bufsz, "C:%-3d", device->proc_id / ZEUSMINER_CHIP_CORES);
+		return true;
+	}
+	return false;
+}
+
+// return the Chip # in via the API when procdetails is called
+static
+struct api_data *zeusminer_get_api_extra_device_detail(struct cgpu_info *device)
+{
+	int chip = device->proc_id / ZEUSMINER_CHIP_CORES;
+	return api_add_int(NULL, "Chip", &chip, true);
+}
+
+/*
+ * specify settings / options via TUI
+ */
+
+#ifdef HAVE_CURSES
+static
+void zeusminer_tui_wlogprint_choices(struct cgpu_info * const proc)
+{
+	wlogprint("[C]lock speed ");
+}
+
+static
+const char *zeusminer_tui_handle_choice(struct cgpu_info * const proc, const int input)
+{
+	static char buf[0x100];  // Static for replies
+
+	switch (input)
+	{
+		case 'c': case 'C':
+		{
+			sprintf(buf, "Set clock speed");
+			char * const setting = curses_input(buf);
+
+			if (zeusminer_set_clock_freq(proc->device, atoi(setting)))
+			{
+				return "Clock speed changed\n";
+			}
+			else
+			{
+				sprintf(buf, "Invalid clock: '%s' valid range %d-%d",
+						setting, ZEUSMINER_MIN_CLOCK, ZEUSMINER_MAX_CLOCK);
+				return buf;
+			}
+		}
+	}
+	return NULL;
+}
+
+static
+void zeusminer_wlogprint_status(struct cgpu_info * const proc)
+{
+	struct ICARUS_INFO * const info = proc->device->device_data;
+	wlogprint("Clock speed: %d\n", info->freq);
+}
+#endif
 
 // device_drv definition - miner.h
 
@@ -240,7 +332,22 @@ void zeusminer_drv_init()
 	zeusminer_drv.job_prepare = zeusminer_job_prepare;
 	
 	// specify driver probe priority
-	++zeusminer_drv.probe_priority;
+	// currently setup specifically to probe before DualMiner
+	zeusminer_drv.probe_priority = -100;
+
+	// output the chip # when viewing per-proc stats
+	// so we can easily ID chips vs cores
+	zeusminer_drv.override_statline_temp2 = zeusminer_override_statline_temp2;
+
+	// output the chip # via RPC API
+	zeusminer_drv.get_api_extra_device_detail = zeusminer_get_api_extra_device_detail;
+
+	// TUI support - e.g. setting clock via UI
+#ifdef HAVE_CURSES
+	zeusminer_drv.proc_wlogprint_status = zeusminer_wlogprint_status;
+	zeusminer_drv.proc_tui_wlogprint_choices = zeusminer_tui_wlogprint_choices;
+	zeusminer_drv.proc_tui_handle_choice = zeusminer_tui_handle_choice;
+#endif
 }
 
 struct device_drv zeusminer_drv = {

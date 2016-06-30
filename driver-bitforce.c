@@ -1,6 +1,6 @@
 /*
- * Copyright 2012-2013 Luke Dashjr
- * Copyright 2012 Con Kolivas
+ * Copyright 2012-2014 Luke Dashjr
+ * Copyright 2012-2013 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -25,6 +25,9 @@
 #include "deviceapi.h"
 #include "miner.h"
 #include "lowlevel.h"
+#ifdef NEED_BFG_LOWL_MSWIN
+#include "lowl-mswin.h"
+#endif
 #include "lowl-pci.h"
 #include "lowl-vcom.h"
 #include "util.h"
@@ -92,6 +95,7 @@ struct bitforce_data {
 	bool is_open;
 	struct lowl_pci_handle *lph;
 	uint8_t lasttag;
+	uint8_t lasttag_read;
 	bytes_t getsbuf;
 	int xlink_id;
 	unsigned char next_work_ob[70];  // Data aligned for 32-bit access
@@ -219,6 +223,8 @@ bool bitforce_pci_open(struct cgpu_info * const dev)
 	if (!devdata->lph)
 		return false;
 	devdata->lasttag = (lowl_pci_get_word(devdata->lph, 2, 2) >> 16) & 0xff;
+	devdata->lasttag_read = 0;
+	bytes_reset(&devdata->getsbuf);
 	devdata->is_open = true;
 	return devdata->is_open;
 }
@@ -242,8 +248,14 @@ void _bitforce_pci_read(struct cgpu_info * const dev)
 	uint32_t resp;
 	bytes_t *b = &devdata->getsbuf;
 	
-	if (!bytes_len(&devdata->getsbuf))
+	if (devdata->lasttag != devdata->lasttag_read)
 	{
+		if (unlikely(bytes_len(b)))
+		{
+			applog(LOG_WARNING, "%s: %ld bytes remaining in read buffer at new command", dev->dev_repr, (long)bytes_len(&devdata->getsbuf));
+			bytes_reset(b);
+		}
+		
 		while (((resp = lowl_pci_get_word(devdata->lph, 2, 2)) & 0xff0000) != looking_for)
 			cgsleep_ms(1);
 		
@@ -254,6 +266,8 @@ void _bitforce_pci_read(struct cgpu_info * const dev)
 		void * const buf = bytes_preappend(b, resp + LOWL_PCI_GET_DATA_PADDING);
 		if (lowl_pci_read_data(devdata->lph, buf, resp, 1, 0))
 			bytes_postappend(b, resp);
+		
+		devdata->lasttag_read = devdata->lasttag;
 	}
 }
 
@@ -349,7 +363,12 @@ ssize_t bitforce_read(struct cgpu_info * const proc, void * const buf, const siz
 	ssize_t rv;
 	
 	if (likely(devdata->is_open))
-		rv = devdata->lowlif->read(buf, bufLen, dev);
+	{
+		if (bufLen == 0)
+			rv = 0;
+		else
+			rv = devdata->lowlif->read(buf, bufLen, dev);
+	}
 	else
 		rv = -1;
 	
@@ -506,6 +525,10 @@ bool bitforce_lowl_match(const struct lowlevel_device_info * const info)
 	if (info->lowl == &lowl_pci)
 		return info->vid == BFL_PCI_VENDOR_ID;
 #endif
+#ifdef NEED_BFG_LOWL_MSWIN
+	if (lowl_mswin_match_guid(info, &WIN_GUID_DEVINTERFACE_MonarchKMDF))
+		return true;
+#endif
 	return lowlevel_match_product(info, "BitFORCE", "SHA256");
 }
 
@@ -532,7 +555,7 @@ bool bitforce_detect_oneof(const char * const devpath, struct bitforce_lowl_inte
 	struct cgpu_info *bitforce;
 	char pdevbuf[0x100];
 	size_t pdevbuf_len;
-	char *s;
+	char *s = NULL;
 	int procs = 1, parallel = -1;
 	long maxchipno = 0;
 	struct bitforce_init_data *initdata;
@@ -727,6 +750,10 @@ bool bitforce_lowl_probe(const struct lowlevel_device_info * const info)
 #ifdef NEED_BFG_LOWL_PCI
 	if (info->lowl == &lowl_pci)
 		return bitforce_detect_oneof(info->path, &bfllif_pci);
+#endif
+#ifdef NEED_BFG_LOWL_MSWIN
+	if (lowl_mswin_match_guid(info, &WIN_GUID_DEVINTERFACE_MonarchKMDF))
+		return bitforce_detect_oneof(info->path, &bfllif_vcom);
 #endif
 	return vcom_lowl_probe_wrapper(info, bitforce_detect_one);
 }
@@ -1608,6 +1635,20 @@ static bool bitforce_identify(struct cgpu_info *bitforce)
 	return true;
 }
 
+static
+void bitforce_zero_stats(struct cgpu_info * const proc)
+{
+	struct bitforce_data *data = proc->device_data;
+	
+	// These don't get cleared when not-read, so we clear them here
+	data->volts_count = 0;
+	data->temp[0] = data->temp[1] = 0;
+	free(data->volts);
+	data->volts = NULL;
+	
+	proc->avg_wait_f = 0;
+}
+
 static bool bitforce_thread_init(struct thr_info *thr)
 {
 	struct cgpu_info *bitforce = thr->cgpu;
@@ -1635,7 +1676,7 @@ static bool bitforce_thread_init(struct thr_info *thr)
 		bitforce->sleep_ms = BITFORCE_SLEEP_MS;
 		bitforce->device_data = data = malloc(sizeof(*data));
 		*data = (struct bitforce_data){
-			.lowlif = &bfllif_vcom,
+			.lowlif = initdata->lowlif,
 			.xlink_id = xlink_id,
 			.next_work_ob = ">>>>>>>>|---------- MidState ----------||-DataTail-||Nonces|>>>>>>>>",
 			.proto = BFP_RANGE,
@@ -2572,11 +2613,14 @@ void bitforce_queue_flush(struct thr_info *thr)
 		// There is a race condition where the flush may have reported a job as in progress even though we completed and processed its results just now - so we just silence the sanity check
 		bitforce_queue_flush_sanity_check(thr, &processing, keysz, true);
 	
-final:
-	if (unlikely(inproc != -1 && inproc != data->queued))
+final: ;
+	if (data->style == BFS_28NM)
 	{
-		applog(LOG_WARNING, "%"PRIpreprv": Sanity check: Device work inprogress count mismatch (dev inproc=%d, queued=%d)", bitforce->proc_repr, inproc, data->queued);
-		data->queued = inproc;
+		if (unlikely(inproc != -1 && inproc != data->queued))
+		{
+			applog(LOG_WARNING, "%"PRIpreprv": Sanity check: Device work inprogress count mismatch (dev inproc=%d, queued=%d)", bitforce->proc_repr, inproc, data->queued);
+			data->queued = inproc;
+		}
 	}
 }
 
@@ -2642,6 +2686,7 @@ struct device_drv bitforce_queue_api = {
 	.lowl_probe = bitforce_lowl_probe,
 	.minerloop = minerloop_queue,
 	.reinit_device = bitforce_reinit,
+	.zero_stats = bitforce_zero_stats,
 #ifdef HAVE_CURSES
 	.proc_wlogprint_status = bitforce_wlogprint_status,
 	.proc_tui_wlogprint_choices = bitforce_tui_wlogprint_choices,
