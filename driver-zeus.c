@@ -18,6 +18,7 @@
  * https://mega.co.nz/#F!eVM3xZIY!ogQPjmNfC-ahZuTkwyAWDw
  */
 #include "driver-zeus.h"
+#include <inttypes.h>
 
 
 
@@ -200,7 +201,7 @@ int zeus_excess_nonce_size(int fd, struct ZEUS_INFO *info)
 }
 
 //Calculates the target difficulty
-static double target_diff(const unsigned char *target)
+/*static double target_diff(const unsigned char *target)
 {
 	uint64_t *data64, d64;
 	char rtarget[32];
@@ -212,7 +213,7 @@ static double target_diff(const unsigned char *target)
 		d64=1;
  	
  	return diff_one/d64;
-}
+}*/
 
 static bool zeus_detect_custom(const char *devpath, struct device_drv *dev, struct ZEUS_INFO *info)
 {

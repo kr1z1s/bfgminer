@@ -10,7 +10,7 @@
  */
 
 #include "config.h"
-
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>

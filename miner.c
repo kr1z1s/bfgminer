@@ -12,7 +12,7 @@
  */
 
 #include "config.h"
-
+#include <inttypes.h>
 #ifdef HAVE_CURSES
 #ifdef USE_UNICODE
 #define PDC_WIDE

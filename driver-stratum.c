@@ -8,7 +8,7 @@
  */
 
 #include "config.h"
-
+#include <inttypes.h>
 #ifndef WIN32
 #include <arpa/inet.h>
 #else
